@@ -131,7 +131,7 @@ export default function AttendancePage() {
 
   useEffect(() => {
     Promise.all([loadStudents(), loadSessions()]).finally(() => setLoading(false));
-  }, []);
+  }, [classId]);
 
   const totalAbsent = useMemo(() => absentIds.size, [absentIds]);
   const totalPresent = useMemo(
@@ -397,11 +397,20 @@ export default function AttendancePage() {
           </CardContent>
         </Card>
 
-        {sessions.length > 0 ? (
-          <Card>
-            <CardContent className="grid gap-3">
-              <div className="text-sm font-semibold text-slate-600">Past sessions</div>
-              {sessions.map((session) => (
+        <Card>
+          <CardContent className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-semibold text-slate-600">
+              <span>Past sessions</span>
+              <Button size="sm" variant="secondary" onClick={loadSessions}>
+                Refresh sessions
+              </Button>
+            </div>
+            {sessions.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                No past sessions found for this class yet.
+              </p>
+            ) : (
+              sessions.map((session) => (
                 <div
                   key={session.id}
                   className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm"
@@ -423,10 +432,10 @@ export default function AttendancePage() {
                     </Button>
                   </div>
                 </div>
-              ))}
-            </CardContent>
-          </Card>
-        ) : null}
+              ))
+            )}
+          </CardContent>
+        </Card>
 
         {students.length === 0 ? (
           <Card>
