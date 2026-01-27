@@ -230,11 +230,9 @@ export default function ReportsPage() {
                   value={selectedSessionId}
                   onChange={(event) => setSelectedSessionId(event.target.value)}
                 >
-                  {sessions.map((session: AttendanceSession) => (
+                  {sessions.map((session) => (
                     <option key={session.id} value={session.id}>
-                      {"date" in session
-                        ? `${(session as AttendanceSession).date} ${(session as AttendanceSession).time_slot}`
-                        : session.id}
+                      {session.date} {session.time_slot}
                     </option>
                   ))}
                 </select>
