@@ -229,14 +229,14 @@ export default function ClassesPage() {
                   <Button size="sm" variant="destructive" onClick={() => handleDelete(item)}>
                     Delete
                   </Button>
-                  <Link href={`/classes/${item.id}/students`} className="text-sm text-brand-600">
-                    Manage students
+                  <Link href={`/classes/${item.id}/students`}>
+                    <Button size="sm" variant="secondary">Manage students</Button>
                   </Link>
-                  <Link href={`/classes/${item.id}/attendance`} className="text-sm text-brand-600">
-                    Take attendance
+                  <Link href={`/classes/${item.id}/attendance`}>
+                    <Button size="sm" variant="primary">Take attendance</Button>
                   </Link>
-                  <Link href={`/classes/${item.id}/reports`} className="text-sm text-brand-600">
-                    Reports
+                  <Link href={`/classes/${item.id}/reports`}>
+                    <Button size="sm" variant="secondary">Reports</Button>
                   </Link>
                 </div>
               </CardContent>

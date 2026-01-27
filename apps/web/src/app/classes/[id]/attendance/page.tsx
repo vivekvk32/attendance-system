@@ -41,6 +41,7 @@ export default function AttendancePage() {
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [timeSlot, setTimeSlot] = useState(TIME_SLOTS[0]);
   const [periodCount, setPeriodCount] = useState("1");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -133,6 +134,20 @@ export default function AttendancePage() {
   }, []);
 
   const totalAbsent = useMemo(() => absentIds.size, [absentIds]);
+  const totalPresent = useMemo(
+    () => Math.max(students.length - absentIds.size, 0),
+    [students.length, absentIds.size]
+  );
+  const lastSession = useMemo(() => {
+    if (sessions.length === 0) return null;
+    const sorted = [...sessions].sort((a, b) => {
+      if (a.date === b.date) {
+        return a.time_slot.localeCompare(b.time_slot);
+      }
+      return a.date.localeCompare(b.date);
+    });
+    return sorted[sorted.length - 1];
+  }, [sessions]);
 
   async function handleOpenSession() {
     setStatus(null);
@@ -142,6 +157,26 @@ export default function AttendancePage() {
     }
     if (students.length === 0) {
       setStatus("No students found for this class. Add students or sync from cloud.");
+      return;
+    }
+    if (editingSessionId) {
+      const { data: updated, error: updateError } = await supabase
+        .from("attendance_sessions")
+        .update({
+          date,
+          time_slot: timeSlot,
+          period_count: Number(periodCount)
+        })
+        .eq("id", editingSessionId)
+        .select("id,date,time_slot,period_count")
+        .single();
+      if (updateError) {
+        setStatus(updateError.message);
+        return;
+      }
+      setActiveSession(updated as AttendanceSession);
+      setEditingSessionId(null);
+      await loadSessions();
       return;
     }
     const { data: existing, error } = await supabase
@@ -190,6 +225,38 @@ export default function AttendancePage() {
         updated_at: now,
         deleted_at: null
       } as unknown as Record<string, unknown>);
+    }
+    await loadSessions();
+  }
+
+  async function handleEditSession(session: AttendanceSession) {
+    setEditingSessionId(session.id);
+    setActiveSession(session);
+    setDate(session.date);
+    setTimeSlot(session.time_slot);
+    setPeriodCount(String(session.period_count ?? 1));
+    await loadAttendance(session.id);
+  }
+
+  async function handleDeleteSession(session: AttendanceSession) {
+    const confirmed = window.confirm("Delete this attendance session? This cannot be undone.");
+    if (!confirmed) return;
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("attendance_sessions")
+      .update({ deleted_at: now })
+      .eq("id", session.id);
+    if (error) {
+      setStatus(error.message);
+      return;
+    }
+    if (db) {
+      await db.attendance_sessions.update(session.id, { deleted_at: now, updated_at: now } as Record<string, unknown>);
+    }
+    if (activeSession?.id === session.id) {
+      setActiveSession(null);
+      setEditingSessionId(null);
+      setAbsentIds(new Set());
     }
     await loadSessions();
   }
@@ -265,7 +332,7 @@ export default function AttendancePage() {
             </label>
             <div className="flex items-end gap-2">
               <Button type="button" onClick={handleOpenSession}>
-                Open session
+                {editingSessionId ? "Update session" : "Open session"}
               </Button>
               <Button type="button" variant="secondary" onClick={handleSaveAttendance} disabled={!activeSession}>
                 Save
@@ -278,8 +345,13 @@ export default function AttendancePage() {
         <Card>
           <CardContent className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
             <span>Students: {students.length}</span>
+            <span>Present: {totalPresent}</span>
             <span>Absent: {totalAbsent}</span>
             <span>Session: {activeSession ? `${activeSession.date} ${activeSession.time_slot}` : "None"}</span>
+            <span>
+              Previous:{" "}
+              {lastSession ? `${lastSession.date} ${lastSession.time_slot}` : "No previous session"}
+            </span>
             {sessions.length > 0 ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span>Duplicate absent from:</span>
@@ -297,6 +369,34 @@ export default function AttendancePage() {
             ) : null}
           </CardContent>
         </Card>
+
+        {sessions.length > 0 ? (
+          <Card>
+            <CardContent className="grid gap-3">
+              <div className="text-sm font-semibold text-slate-600">Past sessions</div>
+              {sessions.map((session) => (
+                <div
+                  key={session.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm"
+                >
+                  <div>
+                    <span className="font-semibold text-ink">{session.date}</span>{" "}
+                    <span className="text-slate-500">{session.time_slot}</span>{" "}
+                    <span className="text-slate-400">({session.period_count} period)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => handleEditSession(session)}>
+                      Edit
+                    </Button>
+                    <Button size="sm" variant="destructive" onClick={() => handleDeleteSession(session)}>
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        ) : null}
 
         {students.length === 0 ? (
           <Card>
@@ -339,6 +439,14 @@ export default function AttendancePage() {
               </Card>
             );
           })}
+        </div>
+        <div className="sticky bottom-4 mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white/90 px-4 py-3 shadow-md">
+          <div className="text-sm text-slate-600">
+            Present: {totalPresent} · Absent: {totalAbsent}
+          </div>
+          <Button type="button" onClick={handleSaveAttendance} disabled={!activeSession}>
+            Save attendance
+          </Button>
         </div>
       </AppShell>
     </RequireAuth>
