@@ -7,11 +7,14 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabaseClient";
+import { useAuth } from "@/lib/useAuth";
 import type { StudentRecord } from "@/lib/types";
 
 type AttendanceSession = {
   id: string;
   period_count: number;
+  date: string;
+  time_slot: string;
 };
 
 type AttendanceRecord = {
@@ -23,9 +26,12 @@ type AttendanceRecord = {
 export default function ReportsPage() {
   const params = useParams<{ id: string }>();
   const classId = params.id;
+  const { session } = useAuth();
   const [students, setStudents] = useState<StudentRecord[]>([]);
   const [sessions, setSessions] = useState<AttendanceSession[]>([]);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -46,9 +52,10 @@ export default function ReportsPage() {
 
       const { data: sessionRows, error: sessionError } = await supabase
         .from("attendance_sessions")
-        .select("id,period_count")
+        .select("id,period_count,date,time_slot")
         .eq("class_id", classId)
-        .is("deleted_at", null);
+        .is("deleted_at", null)
+        .order("date", { ascending: false });
       if (sessionError) {
         setStatus(sessionError.message);
         return;
@@ -59,6 +66,9 @@ export default function ReportsPage() {
       if (sessionList.length === 0) {
         setRecords([]);
         return;
+      }
+      if (!selectedSessionId) {
+        setSelectedSessionId(sessionList[0].id);
       }
       const sessionIds = sessionList.map((s) => s.id);
       const { data: recordRows, error: recordError } = await supabase
@@ -73,6 +83,34 @@ export default function ReportsPage() {
     }
     loadData().finally(() => setLoading(false));
   }, [classId]);
+
+  useEffect(() => {
+    if (sessions.length > 0 && !sessions.find((s) => s.id === selectedSessionId)) {
+      setSelectedSessionId(sessions[0].id);
+    }
+  }, [sessions, selectedSessionId]);
+
+  useEffect(() => {
+    async function loadAttendance(sessionId: string) {
+      if (!sessionId) return;
+      const { data, error } = await supabase
+        .from("attendance_records")
+        .select("student_id,status")
+        .eq("session_id", sessionId);
+      if (error) {
+        setStatus(error.message);
+        return;
+      }
+      const absent = new Set<string>();
+      for (const record of data ?? []) {
+        if (record.status === "A") {
+          absent.add(record.student_id);
+        }
+      }
+      setAbsentIds(absent);
+    }
+    loadAttendance(selectedSessionId);
+  }, [selectedSessionId]);
 
   const absentBySession = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -153,9 +191,97 @@ export default function ReportsPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleSaveEditedAttendance() {
+    if (!selectedSessionId) return;
+    const userId = session?.user.id;
+    if (!userId) {
+      setStatus("You are not signed in.");
+      return;
+    }
+    const payload = students.map((student) => ({
+      owner_id: userId,
+      session_id: selectedSessionId,
+      student_id: student.id,
+      status: absentIds.has(student.id) ? "A" : "P"
+    }));
+    const { error } = await supabase.from("attendance_records").upsert(payload, {
+      onConflict: "session_id,student_id"
+    });
+    if (error) {
+      setStatus(error.message);
+    } else {
+      setStatus("Attendance updated.");
+    }
+  }
+
   return (
     <RequireAuth>
       <AppShell title="Class Reports">
+        <Card>
+          <CardHeader>
+            <CardTitle>Edit Attendance</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-sm text-slate-600">
+                Session
+                <select
+                  className="mt-1 h-10 rounded-md border border-slate-200 bg-white px-3 text-sm"
+                  value={selectedSessionId}
+                  onChange={(event) => setSelectedSessionId(event.target.value)}
+                >
+                  {sessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {"date" in session
+                        ? `${(session as AttendanceSession).date} ${(session as AttendanceSession).time_slot}`
+                        : session.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button type="button" onClick={handleSaveEditedAttendance} disabled={!selectedSessionId}>
+                Save attendance
+              </Button>
+              {status ? <span className="text-sm text-slate-600">{status}</span> : null}
+            </div>
+            {students.length === 0 ? (
+              <p className="text-sm text-slate-500">No students for this class.</p>
+            ) : (
+              <div className="grid gap-2">
+                {students.map((student) => {
+                  const absent = absentIds.has(student.id);
+                  return (
+                    <div
+                      key={student.id}
+                      className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-ink">{student.name}</p>
+                        <p className="text-xs text-slate-500">Roll {student.roll_no ?? "—"}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant={absent ? "destructive" : "secondary"}
+                        onClick={() => {
+                          const next = new Set(absentIds);
+                          if (absent) {
+                            next.delete(student.id);
+                          } else {
+                            next.add(student.id);
+                          }
+                          setAbsentIds(next);
+                        }}
+                      >
+                        {absent ? "Absent" : "Present"}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardContent className="flex flex-wrap items-center gap-3">
             <Button type="button" variant="secondary" onClick={handleExport}>
