@@ -1,0 +1,2 @@
+-- Optional seed data for local testing.
+-- Note: owner_id must be a real auth.users id.
