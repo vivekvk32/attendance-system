@@ -229,8 +229,17 @@ export default function AttendancePage() {
     await loadSessions();
   }
 
-  async function handleEditSession(session: AttendanceSession) {
+  async function handleEditSessionDetails(session: AttendanceSession) {
     setEditingSessionId(session.id);
+    setActiveSession(session);
+    setDate(session.date);
+    setTimeSlot(session.time_slot);
+    setPeriodCount(String(session.period_count ?? 1));
+    await loadAttendance(session.id);
+  }
+
+  async function handleEditAttendance(session: AttendanceSession) {
+    setEditingSessionId(null);
     setActiveSession(session);
     setDate(session.date);
     setTimeSlot(session.time_slot);
@@ -259,6 +268,21 @@ export default function AttendancePage() {
       setAbsentIds(new Set());
     }
     await loadSessions();
+  }
+
+  async function handleDeleteClass() {
+    const confirmed = window.confirm("Delete this class and all its sessions? This cannot be undone.");
+    if (!confirmed) return;
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("classes").update({ deleted_at: now }).eq("id", classId);
+    if (error) {
+      setStatus(error.message);
+      return;
+    }
+    if (db) {
+      await db.classes.update(classId, { deleted_at: now, updated_at: now });
+    }
+    window.location.href = "/classes";
   }
 
   async function handleSaveAttendance() {
@@ -337,6 +361,9 @@ export default function AttendancePage() {
               <Button type="button" variant="secondary" onClick={handleSaveAttendance} disabled={!activeSession}>
                 Save
               </Button>
+              <Button type="button" variant="destructive" onClick={handleDeleteClass}>
+                Delete class
+              </Button>
             </div>
             {status ? <p className="text-sm text-slate-600 md:col-span-4">{status}</p> : null}
           </CardContent>
@@ -385,8 +412,11 @@ export default function AttendancePage() {
                     <span className="text-slate-400">({session.period_count} period)</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => handleEditSession(session)}>
-                      Edit
+                    <Button size="sm" variant="secondary" onClick={() => handleEditAttendance(session)}>
+                      Edit attendance
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => handleEditSessionDetails(session)}>
+                      Edit session
                     </Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDeleteSession(session)}>
                       Delete
