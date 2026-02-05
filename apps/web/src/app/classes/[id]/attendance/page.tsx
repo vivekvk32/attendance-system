@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { RequireAuth } from "@/components/RequireAuth";
@@ -43,7 +43,9 @@ export default function AttendancePage() {
   const [periodCount, setPeriodCount] = useState("1");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const [loading, setLoading] = useState(true);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const userId = session?.user.id ?? "";
 
@@ -132,6 +134,22 @@ export default function AttendancePage() {
   useEffect(() => {
     Promise.all([loadStudents(), loadSessions()]).finally(() => setLoading(false));
   }, [classId]);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimer.current) {
+        clearTimeout(noticeTimer.current);
+      }
+    };
+  }, []);
+
+  function pushNotice(message: string, tone: "success" | "error") {
+    setNotice({ message, tone });
+    if (noticeTimer.current) {
+      clearTimeout(noticeTimer.current);
+    }
+    noticeTimer.current = setTimeout(() => setNotice(null), 3000);
+  }
 
   const totalAbsent = useMemo(() => absentIds.size, [absentIds]);
   const totalPresent = useMemo(
@@ -303,8 +321,10 @@ export default function AttendancePage() {
     });
     if (error) {
       setStatus(error.message);
+      pushNotice(error.message, "error");
     } else {
       setStatus("Attendance saved.");
+      pushNotice("Attendance saved.", "success");
     }
   }
 
@@ -487,6 +507,18 @@ export default function AttendancePage() {
             Save attendance
           </Button>
         </div>
+        {notice ? (
+          <div
+            className={`fixed inset-x-4 top-4 z-50 mx-auto max-w-md rounded-xl px-4 py-3 text-sm font-medium text-white shadow-lg md:inset-auto md:right-6 md:top-6 ${
+              notice.tone === "success" ? "bg-emerald-600/90" : "bg-rose-600/90"
+            }`}
+            role="status"
+            aria-live="polite"
+            onClick={() => setNotice(null)}
+          >
+            {notice.message}
+          </div>
+        ) : null}
       </AppShell>
     </RequireAuth>
   );
