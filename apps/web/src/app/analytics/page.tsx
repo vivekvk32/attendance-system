@@ -38,8 +38,11 @@ export default function AnalyticsPage() {
   const [students, setStudents] = useState<StudentRecord[]>([]);
   const [sessions, setSessions] = useState<AttendanceSession[]>([]);
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [allSessions, setAllSessions] = useState<AttendanceSession[]>([]);
+  const [allRecords, setAllRecords] = useState<AttendanceRecord[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [allTimeLoading, setAllTimeLoading] = useState(false);
 
   useEffect(() => {
     async function loadClasses() {
@@ -111,6 +114,46 @@ export default function AnalyticsPage() {
     loadClassData();
   }, [selectedClassId, month]);
 
+  useEffect(() => {
+    async function loadAllTimeData() {
+      if (!selectedClassId) return;
+      setStatus(null);
+      setAllTimeLoading(true);
+      const { data: sessionRows, error: sessionError } = await supabase
+        .from("attendance_sessions")
+        .select("id,date,time_slot,period_count")
+        .eq("class_id", selectedClassId)
+        .is("deleted_at", null)
+        .order("date", { ascending: false });
+      if (sessionError) {
+        setStatus(sessionError.message);
+        setAllTimeLoading(false);
+        return;
+      }
+      const sessionList = (sessionRows ?? []) as AttendanceSession[];
+      setAllSessions(sessionList);
+
+      if (sessionList.length === 0) {
+        setAllRecords([]);
+        setAllTimeLoading(false);
+        return;
+      }
+      const sessionIds = sessionList.map((s) => s.id);
+      const { data: recordRows, error: recordError } = await supabase
+        .from("attendance_records")
+        .select("session_id,student_id,status")
+        .in("session_id", sessionIds);
+      if (recordError) {
+        setStatus(recordError.message);
+        setAllTimeLoading(false);
+        return;
+      }
+      setAllRecords((recordRows ?? []) as AttendanceRecord[]);
+      setAllTimeLoading(false);
+    }
+    loadAllTimeData();
+  }, [selectedClassId]);
+
   const sessionDates = useMemo(() => {
     const unique = new Set(sessions.map((s) => s.date));
     return Array.from(unique).sort();
@@ -128,6 +171,63 @@ export default function AnalyticsPage() {
     }
     return map;
   }, [records]);
+
+  const allSessionStats = useMemo(() => {
+    const map = new Map<string, { present: number; absent: number; total: number }>();
+    for (const record of allRecords) {
+      const entry = map.get(record.session_id) ?? { present: 0, absent: 0, total: 0 };
+      if (record.status === "A") {
+        entry.absent += 1;
+      } else {
+        entry.present += 1;
+      }
+      entry.total += 1;
+      map.set(record.session_id, entry);
+    }
+    return map;
+  }, [allRecords]);
+
+  const allAbsentBySession = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const record of allRecords) {
+      if (record.status === "A") {
+        if (!map.has(record.session_id)) {
+          map.set(record.session_id, new Set());
+        }
+        map.get(record.session_id)?.add(record.student_id);
+      }
+    }
+    return map;
+  }, [allRecords]);
+
+  const allSessionWeights = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const session of allSessions) {
+      map.set(session.id, session.period_count || 1);
+    }
+    return map;
+  }, [allSessions]);
+
+  const allSessionsSorted = useMemo(() => {
+    return [...allSessions].sort((a, b) => {
+      if (a.date === b.date) {
+        return a.time_slot.localeCompare(b.time_slot);
+      }
+      return b.date.localeCompare(a.date);
+    });
+  }, [allSessions]);
+
+  const allTotals = useMemo(() => {
+    let present = 0;
+    let absent = 0;
+    let total = 0;
+    for (const stats of allSessionStats.values()) {
+      present += stats.present;
+      absent += stats.absent;
+      total += stats.total;
+    }
+    return { present, absent, total };
+  }, [allSessionStats]);
 
   const absentByDate = useMemo(() => {
     const byDate = new Map<string, Set<string>>();
@@ -176,6 +276,59 @@ export default function AnalyticsPage() {
       };
     });
   }, [students, sessions, absentBySession, totalWeightedBySession]);
+
+  const allTimeSummaryByStudent = useMemo(() => {
+    const totalWeighted = allSessions.reduce(
+      (sum, session) => sum + (session.period_count || 1),
+      0
+    );
+    return students.map((student) => {
+      let absentWeighted = 0;
+      for (const session of allSessions) {
+        const absentSet = allAbsentBySession.get(session.id);
+        if (absentSet && absentSet.has(student.id)) {
+          absentWeighted += allSessionWeights.get(session.id) ?? 1;
+        }
+      }
+      const presentWeighted = Math.max(totalWeighted - absentWeighted, 0);
+      const percentage =
+        totalWeighted === 0 ? 0 : Math.round((presentWeighted / totalWeighted) * 100);
+      return {
+        student,
+        totalWeighted,
+        absentWeighted,
+        presentWeighted,
+        percentage
+      };
+    });
+  }, [students, allSessions, allAbsentBySession, allSessionWeights]);
+
+  const maxAbsentees = useMemo(() => {
+    if (students.length === 0 || allSessions.length === 0) return [];
+    const absentCount = new Map<string, number>();
+    for (const record of allRecords) {
+      if (record.status === "A") {
+        const weight = allSessionWeights.get(record.session_id) ?? 1;
+        absentCount.set(record.student_id, (absentCount.get(record.student_id) ?? 0) + weight);
+      }
+    }
+    let maxAbsent = 0;
+    for (const value of absentCount.values()) {
+      if (value > maxAbsent) maxAbsent = value;
+    }
+    if (maxAbsent === 0) return [];
+    return students
+      .map((student) => ({
+        student,
+        absentWeighted: absentCount.get(student.id) ?? 0
+      }))
+      .filter((entry) => entry.absentWeighted === maxAbsent)
+      .sort((a, b) => {
+        const rollA = a.student.roll_no ?? "";
+        const rollB = b.student.roll_no ?? "";
+        return rollA.localeCompare(rollB);
+      });
+  }, [students, allRecords, allSessionWeights, allSessions]);
 
   function csvEscape(value: string | number | null | undefined) {
     const raw = value === null || value === undefined ? "" : String(value);
@@ -372,6 +525,130 @@ export default function AnalyticsPage() {
                       <span>Absent: {entry.absentWeighted}</span>
                       <span>Total: {entry.totalWeighted}</span>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {allTimeLoading ? <p className="text-sm text-slate-500">Loading all-time attendance...</p> : null}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>All-Time Student Summary (Weighted)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {students.length === 0 ? (
+              <p className="text-sm text-slate-500">No students to summarize yet.</p>
+            ) : allSessions.length === 0 ? (
+              <p className="text-sm text-slate-500">No attendance sessions yet for this class.</p>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                {allTimeSummaryByStudent.map((entry) => (
+                  <div
+                    key={`all-time-${entry.student.id}`}
+                    className="rounded-lg border border-slate-200 bg-white px-4 py-3"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-ink">{entry.student.name}</p>
+                        <p className="text-xs text-slate-500">Roll {entry.student.roll_no ?? "â€”"}</p>
+                      </div>
+                      <span
+                        className={
+                          entry.percentage >= 75
+                            ? "rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700"
+                            : entry.percentage >= 60
+                              ? "rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700"
+                              : "rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600"
+                        }
+                      >
+                        {entry.percentage}%
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-center gap-3 text-xs text-slate-500">
+                      <span>Present: {entry.presentWeighted}</span>
+                      <span>Absent: {entry.absentWeighted}</span>
+                      <span>Total: {entry.totalWeighted}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>All Sessions (All time)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {allSessionsSorted.length === 0 ? (
+              <p className="text-sm text-slate-500">No attendance sessions yet for this class.</p>
+            ) : (
+              <div className="overflow-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-500">
+                      <th className="py-2 pr-4">Date</th>
+                      <th className="py-2 pr-4">Time slot</th>
+                      <th className="py-2 pr-4">Periods</th>
+                      <th className="py-2 pr-4">Present</th>
+                      <th className="py-2 pr-4">Absent</th>
+                      <th className="py-2 pr-4">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allSessionsSorted.map((session) => {
+                      const stats = allSessionStats.get(session.id) ?? { present: 0, absent: 0, total: 0 };
+                      return (
+                        <tr key={`all-${session.id}`} className="border-t">
+                          <td className="py-2 pr-4 font-medium text-ink">{session.date}</td>
+                          <td className="py-2 pr-4 text-slate-500">{session.time_slot}</td>
+                          <td className="py-2 pr-4 text-slate-500">{session.period_count}</td>
+                          <td className="py-2 pr-4 text-emerald-700">{stats.present}</td>
+                          <td className="py-2 pr-4 text-rose-600">{stats.absent}</td>
+                          <td className="py-2 pr-4">{stats.total}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="border-t bg-slate-50 text-slate-600">
+                      <td className="py-2 pr-4 font-semibold" colSpan={3}>
+                        Totals
+                      </td>
+                      <td className="py-2 pr-4 font-semibold">{allTotals.present}</td>
+                      <td className="py-2 pr-4 font-semibold">{allTotals.absent}</td>
+                      <td className="py-2 pr-4 font-semibold">{allTotals.total}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Absentees (All time)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {maxAbsentees.length === 0 ? (
+              <p className="text-sm text-slate-500">No absences recorded yet.</p>
+            ) : (
+              <div className="grid gap-2">
+                {maxAbsentees.map((entry) => (
+                  <div
+                    key={`max-absent-${entry.student.id}`}
+                    className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-ink">{entry.student.name}</p>
+                      <p className="text-xs text-slate-500">Roll {entry.student.roll_no ?? "â€”"}</p>
+                    </div>
+                    <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600">
+                      {entry.absentWeighted} periods absent
+                    </span>
                   </div>
                 ))}
               </div>
