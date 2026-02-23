@@ -23,6 +23,17 @@ type AttendanceRecord = {
   status: "P" | "A";
 };
 
+type StudentOverallSummary = {
+  student: StudentRecord;
+  totalWeighted: number;
+  absentWeighted: number;
+  presentWeighted: number;
+  presentPercentage: number;
+  absentPercentage: number;
+  belowThreshold: boolean;
+  bySessionStatus: ("P" | "A")[];
+};
+
 export default function ReportsPage() {
   const params = useParams<{ id: string }>();
   const classId = params.id;
@@ -158,35 +169,134 @@ export default function ReportsPage() {
       };
     });
   }, [students, sessions, absentBySession, totalWeightedBySession]);
+  const sortedSessions = useMemo(
+    () =>
+      [...sessions].sort((a, b) => {
+        if (a.date === b.date) {
+          return a.time_slot.localeCompare(b.time_slot);
+        }
+        return a.date.localeCompare(b.date);
+      }),
+    [sessions]
+  );
 
-  function csvEscape(value: string | number | null | undefined) {
+  const overallReportRows = useMemo<StudentOverallSummary[]>(() => {
+    const totalWeighted = sortedSessions.reduce(
+      (sum, session) => sum + (totalWeightedBySession.get(session.id) ?? 1),
+      0
+    );
+    return students.map((student) => {
+      let absentWeighted = 0;
+      const bySessionStatus: ("P" | "A")[] = [];
+      for (const session of sortedSessions) {
+        const absentSet = absentBySession.get(session.id);
+        const isAbsent = Boolean(absentSet && absentSet.has(student.id));
+        if (isAbsent) {
+          absentWeighted += totalWeightedBySession.get(session.id) ?? 1;
+        }
+        bySessionStatus.push(isAbsent ? "A" : "P");
+      }
+      const presentWeighted = Math.max(totalWeighted - absentWeighted, 0);
+      const presentPercentage =
+        totalWeighted === 0 ? 0 : Number(((presentWeighted / totalWeighted) * 100).toFixed(2));
+      const absentPercentage =
+        totalWeighted === 0 ? 0 : Number(((absentWeighted / totalWeighted) * 100).toFixed(2));
+      return {
+        student,
+        totalWeighted,
+        absentWeighted,
+        presentWeighted,
+        presentPercentage,
+        absentPercentage,
+        belowThreshold: presentPercentage < 85,
+        bySessionStatus
+      };
+    });
+  }, [students, sortedSessions, absentBySession, totalWeightedBySession]);
+
+  function escapeHtml(value: string | number | null | undefined) {
     const raw = value === null || value === undefined ? "" : String(value);
-    if (raw.includes(",") || raw.includes('"') || raw.includes("\n")) {
-      return `"${raw.replace(/"/g, '""')}"`;
-    }
-    return raw;
+    return raw
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
-  function handleExport() {
-    if (summaryByStudent.length === 0) return;
-    const header = ["roll_no", "name", "present_count", "absent_count", "total_weighted", "percentage"];
-    const rows = summaryByStudent.map((entry) => [
-      entry.student.roll_no ?? "",
-      entry.student.name,
-      entry.presentWeighted,
-      entry.absentWeighted,
-      entry.totalWeighted,
-      entry.percentage
-    ]);
-    const csv =
-      header.join(",") +
-      "\n" +
-      rows.map((row) => row.map(csvEscape).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  function sessionHeaderLabel(session: AttendanceSession) {
+    const periods = session.period_count || 1;
+    return periods > 1
+      ? `${session.date} ${session.time_slot} (${periods})`
+      : `${session.date} ${session.time_slot}`;
+  }
+
+  function handleGenerateOverallExcel() {
+    setStatus(null);
+    if (overallReportRows.length === 0) {
+      setStatus("No attendance data available to export.");
+      return;
+    }
+    const sessionHeaders = sortedSessions
+      .map((session) => `<th>${escapeHtml(sessionHeaderLabel(session))}</th>`)
+      .join("");
+    const rows = overallReportRows
+      .map((entry) => {
+        const sessionCells = entry.bySessionStatus
+          .map((statusValue) => `<td style="text-align:center">${statusValue}</td>`)
+          .join("");
+        const rowStyle = entry.belowThreshold
+          ? ' style="background:#fee2e2;color:#991b1b;font-weight:600"'
+          : "";
+        return `<tr${rowStyle}>
+  <td>${escapeHtml(entry.student.roll_no ?? "")}</td>
+  <td>${escapeHtml(entry.student.name)}</td>
+  ${sessionCells}
+  <td style="text-align:center">${entry.totalWeighted}</td>
+  <td style="text-align:center">${entry.presentWeighted}</td>
+  <td style="text-align:center">${entry.absentWeighted}</td>
+  <td style="text-align:center">${entry.presentPercentage.toFixed(2)}%</td>
+  <td style="text-align:center">${entry.absentPercentage.toFixed(2)}%</td>
+</tr>`;
+      })
+      .join("");
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    table { border-collapse: collapse; font-family: Calibri, Arial, sans-serif; font-size: 12px; }
+    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; white-space: nowrap; }
+    th { background: #e2e8f0; font-weight: 700; text-align: center; }
+  </style>
+</head>
+<body>
+  <table>
+    <thead>
+      <tr>
+        <th>Roll No</th>
+        <th>Student Name</th>
+        ${sessionHeaders}
+        <th>Total Classes</th>
+        <th>Present</th>
+        <th>Absent</th>
+        <th>Present %</th>
+        <th>Absent %</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows}
+    </tbody>
+  </table>
+</body>
+</html>`;
+    const blob = new Blob(["\ufeff", html], {
+      type: "application/vnd.ms-excel;charset=utf-8;"
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `class_report_${classId}.csv`;
+    link.download = `overall_attendance_${classId}.xls`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -282,8 +392,8 @@ export default function ReportsPage() {
 
         <Card>
           <CardContent className="flex flex-wrap items-center gap-3">
-            <Button type="button" variant="secondary" onClick={handleExport}>
-              Export report CSV
+            <Button type="button" variant="secondary" onClick={handleGenerateOverallExcel}>
+              Generate Overall Excel
             </Button>
             {status ? <span className="text-sm text-rose-600">{status}</span> : null}
           </CardContent>
@@ -324,11 +434,9 @@ export default function ReportsPage() {
                         <td className="py-2 pr-4">
                           <span
                             className={
-                              entry.percentage >= 75
+                              entry.percentage >= 85
                                 ? "rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700"
-                                : entry.percentage >= 60
-                                  ? "rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700"
-                                  : "rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600"
+                                : "rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600"
                             }
                           >
                             {entry.percentage}%
