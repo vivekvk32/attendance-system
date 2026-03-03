@@ -23,6 +23,56 @@ const TIME_SLOTS = [
   "15:45-16:40"
 ];
 
+const PERIOD_COUNT_MIN = 1;
+const PERIOD_COUNT_MAX = 4;
+const SLOT_SEPARATOR = " + ";
+
+function parsePeriodCount(value: string) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return PERIOD_COUNT_MIN;
+  }
+  return Math.min(Math.max(parsed, PERIOD_COUNT_MIN), PERIOD_COUNT_MAX);
+}
+
+function normalizeSlots(slots: string[]) {
+  const unique = new Set(slots.filter((slot) => TIME_SLOTS.includes(slot)));
+  return [...unique].sort((a, b) => TIME_SLOTS.indexOf(a) - TIME_SLOTS.indexOf(b));
+}
+
+function serializeSlots(slots: string[]) {
+  return normalizeSlots(slots).join(SLOT_SEPARATOR);
+}
+
+function parseStoredSlots(value: string) {
+  const rawSlots = value
+    .split(/\s*\+\s*|,\s*/)
+    .map((slot) => slot.trim())
+    .filter(Boolean);
+  const knownSlots = normalizeSlots(rawSlots);
+  if (knownSlots.length > 0) {
+    return knownSlots;
+  }
+  const fallback = value.trim();
+  return fallback ? [fallback] : [];
+}
+
+function getDefaultSlots(startSlot: string, count: number) {
+  const startIndex = TIME_SLOTS.indexOf(startSlot);
+  if (startIndex >= 0) {
+    const forward = TIME_SLOTS.slice(startIndex, startIndex + count);
+    if (forward.length === count) {
+      return forward;
+    }
+  }
+  return TIME_SLOTS.slice(0, count);
+}
+
+function sameSlots(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  return a.every((slot, index) => slot === b[index]);
+}
+
 type AttendanceSession = {
   id: string;
   date: string;
@@ -41,6 +91,7 @@ export default function AttendancePage() {
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [timeSlot, setTimeSlot] = useState(TIME_SLOTS[0]);
   const [periodCount, setPeriodCount] = useState("1");
+  const [selectedTimeSlots, setSelectedTimeSlots] = useState<string[]>([TIME_SLOTS[0]]);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
@@ -156,6 +207,7 @@ export default function AttendancePage() {
     () => Math.max(students.length - absentIds.size, 0),
     [students.length, absentIds.size]
   );
+  const periodCountValue = useMemo(() => parsePeriodCount(periodCount), [periodCount]);
   const lastSession = useMemo(() => {
     if (sessions.length === 0) return null;
     const sorted = [...sessions].sort((a, b) => {
@@ -167,6 +219,79 @@ export default function AttendancePage() {
     return sorted[sorted.length - 1];
   }, [sessions]);
 
+  useEffect(() => {
+    if (periodCountValue <= 1) {
+      setSelectedTimeSlots((previous) => (sameSlots(previous, [timeSlot]) ? previous : [timeSlot]));
+      return;
+    }
+
+    setSelectedTimeSlots((previous) => {
+      const normalized = normalizeSlots(previous);
+      let next = normalized;
+
+      if (next.length > periodCountValue) {
+        next = next.slice(0, periodCountValue);
+      } else if (next.length < periodCountValue) {
+        const defaults = getDefaultSlots(timeSlot, periodCountValue);
+        next = normalizeSlots([...next, ...defaults]).slice(0, periodCountValue);
+      }
+
+      return sameSlots(previous, next) ? previous : next;
+    });
+  }, [periodCountValue, timeSlot]);
+
+  function getSessionTimeSlotPayload() {
+    if (periodCountValue <= 1) {
+      return { periodCount: 1, timeSlotValue: timeSlot };
+    }
+    const normalized = normalizeSlots(selectedTimeSlots);
+    if (normalized.length !== periodCountValue) {
+      setStatus(`Select exactly ${periodCountValue} hours for ${periodCountValue} periods.`);
+      return null;
+    }
+    return {
+      periodCount: periodCountValue,
+      timeSlotValue: serializeSlots(normalized)
+    };
+  }
+
+  function applySessionToForm(session: AttendanceSession) {
+    const parsedSlots = parseStoredSlots(session.time_slot);
+    const safePeriodCount = Math.min(
+      Math.max(session.period_count ?? parsedSlots.length ?? PERIOD_COUNT_MIN, PERIOD_COUNT_MIN),
+      PERIOD_COUNT_MAX
+    );
+    const primarySlot = parsedSlots[0] ?? TIME_SLOTS[0];
+
+    setDate(session.date);
+    setTimeSlot(primarySlot);
+    setPeriodCount(String(safePeriodCount));
+    if (safePeriodCount > 1) {
+      const knownSlots = normalizeSlots(parsedSlots);
+      const defaults = getDefaultSlots(primarySlot, safePeriodCount);
+      const nextSlots = normalizeSlots([...knownSlots, ...defaults]).slice(0, safePeriodCount);
+      setSelectedTimeSlots(nextSlots);
+    } else {
+      setSelectedTimeSlots([primarySlot]);
+    }
+  }
+
+  function handleToggleTimeSlot(slot: string) {
+    if (periodCountValue <= 1) {
+      setTimeSlot(slot);
+      return;
+    }
+    setSelectedTimeSlots((previous) => {
+      if (previous.includes(slot)) {
+        return previous.filter((value) => value !== slot);
+      }
+      if (previous.length >= periodCountValue) {
+        return previous;
+      }
+      return normalizeSlots([...previous, slot]);
+    });
+  }
+
   async function handleOpenSession() {
     setStatus(null);
     if (!userId) {
@@ -177,13 +302,17 @@ export default function AttendancePage() {
       setStatus("No students found for this class. Add students or sync from cloud.");
       return;
     }
+    const payload = getSessionTimeSlotPayload();
+    if (!payload) {
+      return;
+    }
     if (editingSessionId) {
       const { data: updated, error: updateError } = await supabase
         .from("attendance_sessions")
         .update({
           date,
-          time_slot: timeSlot,
-          period_count: Number(periodCount)
+          time_slot: payload.timeSlotValue,
+          period_count: payload.periodCount
         })
         .eq("id", editingSessionId)
         .select("id,date,time_slot,period_count")
@@ -202,7 +331,7 @@ export default function AttendancePage() {
       .select("id,date,time_slot,period_count")
       .eq("class_id", classId)
       .eq("date", date)
-      .eq("time_slot", timeSlot)
+      .eq("time_slot", payload.timeSlotValue)
       .maybeSingle();
     if (error) {
       setStatus(error.message);
@@ -221,8 +350,8 @@ export default function AttendancePage() {
         owner_id: userId,
         class_id: classId,
         date,
-        time_slot: timeSlot,
-        period_count: Number(periodCount),
+        time_slot: payload.timeSlotValue,
+        period_count: payload.periodCount,
         created_at: now,
         updated_at: now
       })
@@ -250,18 +379,14 @@ export default function AttendancePage() {
   async function handleEditSessionDetails(session: AttendanceSession) {
     setEditingSessionId(session.id);
     setActiveSession(session);
-    setDate(session.date);
-    setTimeSlot(session.time_slot);
-    setPeriodCount(String(session.period_count ?? 1));
+    applySessionToForm(session);
     await loadAttendance(session.id);
   }
 
   async function handleEditAttendance(session: AttendanceSession) {
     setEditingSessionId(null);
     setActiveSession(session);
-    setDate(session.date);
-    setTimeSlot(session.time_slot);
-    setPeriodCount(String(session.period_count ?? 1));
+    applySessionToForm(session);
     await loadAttendance(session.id);
   }
 
@@ -368,8 +493,8 @@ export default function AttendancePage() {
               Period count
               <Input
                 type="number"
-                min={1}
-                max={4}
+                min={PERIOD_COUNT_MIN}
+                max={PERIOD_COUNT_MAX}
                 value={periodCount}
                 onChange={(event) => setPeriodCount(event.target.value)}
               />
@@ -385,6 +510,31 @@ export default function AttendancePage() {
                 Delete class
               </Button>
             </div>
+            {periodCountValue > 1 ? (
+              <div className="md:col-span-4">
+                <p className="text-sm text-slate-600">
+                  Select {periodCountValue} hours ({selectedTimeSlots.length}/{periodCountValue} selected)
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {TIME_SLOTS.map((slot) => {
+                    const selected = selectedTimeSlots.includes(slot);
+                    const disabled = !selected && selectedTimeSlots.length >= periodCountValue;
+                    return (
+                      <Button
+                        key={slot}
+                        type="button"
+                        size="sm"
+                        variant={selected ? "primary" : "secondary"}
+                        disabled={disabled}
+                        onClick={() => handleToggleTimeSlot(slot)}
+                      >
+                        {slot}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
             {status ? <p className="text-sm text-slate-600 md:col-span-4">{status}</p> : null}
           </CardContent>
         </Card>
@@ -438,7 +588,9 @@ export default function AttendancePage() {
                   <div>
                     <span className="font-semibold text-ink">{session.date}</span>{" "}
                     <span className="text-slate-500">{session.time_slot}</span>{" "}
-                    <span className="text-slate-400">({session.period_count} period)</span>
+                    <span className="text-slate-400">
+                      ({session.period_count} {session.period_count === 1 ? "period" : "periods"})
+                    </span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Button size="sm" variant="secondary" onClick={() => handleEditAttendance(session)}>
